@@ -1,3 +1,4 @@
+import os
 import sys
 import re
 import logging
@@ -297,8 +298,12 @@ def fetch_urls_and_descriptions_swagger(search_term):
                 break
 
         # Save results to a file
+        output_dir = "results"
+        os.makedirs(output_dir, exist_ok=True)
         filename = f"swagger_results_{search_term}.txt".replace(" ", "_")
-        save_results_to_file(filename, results)
+        filepath = os.path.join(output_dir, filename)
+        
+        save_results_to_file(filepath, results)
         print_colored(f"\n[+] SwaggerHub results saved to {filename}", Fore.MAGENTA)
 
         logger.info(f"Total APIs fetched from SwaggerHub: {len(apis)}")
@@ -656,11 +661,14 @@ def enhanced_main(search_term, mode):
         "-s": "swagger",
         "-explore": "explore"
     }
+    output_dir = "results"
+    os.makedirs(output_dir, exist_ok=True)
+    
     filename_prefix = mode_mapping.get(mode, "results")
     filename = f"{filename_prefix}_{search_term}.txt".replace(" ", "_")
-
+    filepath = os.path.join(output_dir, filename)
     # Save results to file
-    save_results_to_file(filename, results)
+    save_results_to_file(filepath, results)
 
     print_colored("\n[+] Scan completed successfully.", Fore.MAGENTA)
     logger.info("Scan completed.")
