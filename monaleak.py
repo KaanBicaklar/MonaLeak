@@ -7,6 +7,8 @@ from colorama import Fore, Style, Back
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import math
 from googlesearch import search
+from requests.adapters import HTTPAdapter
+from requests.packages.urllib3.util.retry import Retry
 
 # Logger setup
 logger = logging.getLogger("monaleak")
@@ -81,6 +83,46 @@ def google_dork_search(search_term, num_results=30):
         logger.error(f"Error during Google Dork search: {str(e)}")
     return urls
 
+def wayback_search(search_term, filters=None):
+    """
+    Searches the Wayback Machine for archived snapshots of the given target domain.
+
+    Args:
+        search_term (str): The target domain to retrieve snapshots for.
+        filters (dict, optional): Additional query parameters to filter the results.
+
+    Returns:
+        list: A list of snapshot URLs from the Wayback Machine.
+    """
+    base_url = "https://web.archive.org/cdx/search/cdx"  # changed to HTTPS
+    params = {
+        "url": search_term,
+        "output": "json",
+        "collapse": "timestamp"
+    }
+    if filters:
+        params.update(filters)
+
+    try:
+        response = requests.get(base_url, params=params, timeout=100)
+        if response.status_code == 200:
+            data = response.json()
+            snapshots = []
+            # First row is header, skip it
+            for row in data[1:]:
+                if len(row) >= 3:
+                    timestamp = row[1]
+                    original_url = row[2]
+                    # Construct the snapshot URL with HTTPS
+                    snapshot_url = f"https://web.archive.org/web/{timestamp}/{original_url}"
+                    snapshots.append(snapshot_url)
+            return list(set(snapshots))
+        else:
+            logger.error(f"Wayback Machine search failed with status code: {response.status_code}")
+    except Exception as e:
+        logger.error(f"Error during Wayback Machine search: {str(e)}")
+    return []
+
 def github_search(query, num_results=100):
     """
     Search GitHub for code matching the query using GitHub Search API.
@@ -116,7 +158,7 @@ def github_search(query, num_results=100):
         logger.error(f"Error during GitHub search: {str(e)}")
     return []
 
-{
+regex_patterns = {
     "Cloudinary": "cloudinary://.*",
     "Firebase URL": ".*firebaseio\\.com",
     "Slack Token": "(?i)xox[a-zA-Z]-[0-9a-zA-Z]{10,48}",
@@ -219,6 +261,25 @@ def check_regex(data, regex_patterns):
         matches.extend([(pattern_name, match) for match in re.findall(pattern, data)])
     return matches
 
+def get_retry_session(retries=5, backoff_factor=1, status_forcelist=(500, 502, 504)):
+    session = requests.Session()
+    # Adding a User-Agent header
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (compatible; MonaLeak Bot/1.0)"
+    })
+    retry = Retry(
+        total=retries,
+        read=retries,
+        connect=retries,
+        backoff_factor=backoff_factor,
+        status_forcelist=status_forcelist,
+        raise_on_status=False
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    return session
+
 def process_url(url, regex_patterns):
     """
     Fetches the content of a URL and scans it for sensitive data using regex patterns.
@@ -231,11 +292,13 @@ def process_url(url, regex_patterns):
         list: A list of matches found in the URL content.
     """
     if not url.startswith("http"):
-        logger.error(f"Invalid URL: {url}. Expected a valid HTTP/HTTPS URL.")
+        logger.error(f"Invalid URL: {url}. Expected valid HTTP/HTTPS URL.")
         return []
 
     try:
-        response = requests.get(url, timeout=10)
+        session = get_retry_session()
+        # Increase timeout to give server more time
+        response = session.get(url, timeout=20)
         if response.status_code == 200:
             return check_regex(response.text, regex_patterns)
         else:
@@ -586,7 +649,8 @@ def enhanced_main(search_term, mode):
         print_colored("An error occurred during the discovery process. Check logs for details.", Fore.RED)
 
     total_apis = len(apis_swagger) + len(apis_postman) + len(google_dork_urls) + len(github_results)
-    if not total_apis:
+    # Only check for APIs if mode is not exclusively -w
+    if mode != "-w" and not total_apis:
         print_colored("[!] No APIs found. Please refine your search term.", Fore.YELLOW)
         return
 
@@ -632,6 +696,28 @@ def enhanced_main(search_term, mode):
             print_colored(f"  [Repository] {repository}", Fore.CYAN)
             print_colored(f"  [URL] {file_url}", Fore.CYAN)
 
+    # Display and collect Wayback Machine results
+    if mode in ["-w"]:
+        print_colored("\n[+] Wayback Machine Search Results:", Fore.MAGENTA)
+        wayback_results = wayback_search(search_term)
+        if wayback_results:
+            for url in wayback_results:
+                processed_matches = process_url(url, regex_patterns)
+                if processed_matches:
+                    results.append(f"Snapshot URL: {url}")
+                    results.append("  Sensitive data:")
+                    print_colored(f"Snapshot URL: {url}", Fore.CYAN)
+                    print_colored("  Sensitive data:", Fore.RED)
+                    for match in processed_matches:
+                        results.append(f"    {match[0]} -> {match[1]}")
+                        print_colored(f"    {match[0]}: {match[1]}", Fore.RED)
+                else:
+                    processed_line = f"Snapshot URL: {url} - No sensitive data found"
+                    results.append(processed_line)
+                    print_colored(processed_line, Fore.YELLOW)
+        else:
+            print_colored("[!] No Wayback Machine results found.", Fore.YELLOW)
+
     # If '-explore' mode is selected, scan for sensitive data
     if "-explore" in mode:
         logger.info("-explore mode detected. Starting URL detection and sensitive data scan.")
@@ -658,6 +744,7 @@ def enhanced_main(search_term, mode):
         "-p": "postman",
         "-g": "google",
         "-gh": "github",
+        "-w": "wayback",
         "-s": "swagger",
         "-explore": "explore"
     }
@@ -677,7 +764,7 @@ if __name__ == "__main__":
     if len(sys.argv) < 3:
         display_banner()  # Display the banner for incorrect usage
         print_colored("\nUsage: python3 monaleak.py <parameter> <search_term>", Fore.RED, style=Style.BRIGHT)
-        print_colored("Parameters:\n  -s : Search only SwaggerHub\n  -p : Search only Postman\n  -g : Perform Google Dork search\n  -gh : Perform GitHub search\n  -a : Search all\n  -explore : Find all secret in URLS ", Fore.RED)
+        print_colored("Parameters:\n  -s : Search only SwaggerHub\n  -p : Search only Postman\n  -g : Perform Google Dork search\n  -gh : Perform GitHub search\n  -w : Search Wayback Machine\n  -a : Search all\n  -explore : Find all secret in URLS ", Fore.RED)
         sys.exit(1)
 
     mode = sys.argv[1]
