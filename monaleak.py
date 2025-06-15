@@ -116,7 +116,7 @@ def github_search(query, num_results=100):
         logger.error(f"Error during GitHub search: {str(e)}")
     return []
 
-regex_patterns{
+regex_patterns={
     "Cloudinary": "cloudinary://.*",
     "Firebase URL": ".*firebaseio\\.com",
     "Slack Token": "(?i)xox[a-zA-Z]-[0-9a-zA-Z]{10,48}",
