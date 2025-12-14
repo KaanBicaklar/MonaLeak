@@ -6,7 +6,9 @@ import requests
 from colorama import Fore, Style, Back
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import math
-from googlesearch import search
+from bs4 import BeautifulSoup
+import urllib.parse
+from ddgs import DDGS
 
 # Logger setup
 logger = logging.getLogger("monaleak")
@@ -23,7 +25,7 @@ MAX_SEARCH_RESULTS = 25
 MAX_OFFSET = 200
 
 GITHUB_API_URL = "https://api.github.com/search/code"
-GITHUB_TOKEN = "changeme"  # GitHub Personal Access Token
+GITHUB_TOKEN = ""  # GitHub Personal Access Token
 
 # Display a graphical banner
 def display_banner():
@@ -56,30 +58,108 @@ def print_colored(message, color=Fore.WHITE, background=Back.BLACK, style=Style.
 
 def google_dork_search(search_term, num_results=30):
     """
-    Perform Google Dork searches using the googlesearch module.
+    Perform Dork searches using DuckDuckGo and Yandex.
+    Only returns URLs where the search term is confirmed to exist in the page content.
 
     Args:
         search_term (str): The search term to use in the dork queries.
         num_results (int): Number of results to fetch for each dork query (default: 30).
 
     Returns:
-        list: A list of URLs from the search results.
+        list: A list of URLs from the search results that contain the search term.
     """
+    # Optimized dork queries - using OR operators to reduce search count
     dork_queries = [
-        f'site:gist.github.com "{search_term}"',
-        f'site:pastebin.com "{search_term}"',
-        f'intitle:"GitLab" intext:{search_term}',
+        # Code hosting platforms combined
+        f'(site:gist.github.com OR site:pastebin.com OR site:gitlab.com OR site:bitbucket.org) "{search_term}"',
+        
+        # Config and env files combined
+        f'"{search_term}" (filetype:env OR filetype:json OR filetype:yaml OR filetype:yml OR filetype:xml OR filetype:config OR filetype:conf OR filetype:sql OR filetype:ini OR  filetype:bak OR filetype:log OR filetype:txt)',
+
+        f'"{search_term}" (intitle:"index of" OR inurl:admin OR inurl:login OR inurl:dashboard)',
     ]
 
     urls = []
+    verified_urls = []
+    
+    # Domains to exclude from results (ads, tracking, etc.)
+    excluded_domains = ['bing.com',  'facebook.com', 'twitter.com', 'yandex.com', 'yandex.ru', 'duckduckgo.com', 'amazon.com', 'linkedin.com', 'pinterest.com', 'instagram.com']
+    
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+    }
+    
     try:
+        # DuckDuckGo search
+        ddgs = DDGS()
         for dork_query in dork_queries:
-            logger.info(f"Running Google Dork: {dork_query}")
-            for url in search(dork_query, num_results=num_results, lang="en"):
-                urls.append(url)
+            logger.info(f"Running DuckDuckGo Dork: {dork_query}")
+            try:
+                results = ddgs.text(dork_query, max_results=num_results)
+                for result in results:
+                    if 'href' in result:
+                        url = result['href']
+                        if not any(domain in url for domain in excluded_domains):
+                            urls.append(url)
+            except Exception as e:
+                logger.debug(f"DuckDuckGo error for query '{dork_query}': {str(e)}")
+        
+        # Yandex search
+        for dork_query in dork_queries:
+            logger.info(f"Running Yandex Dork: {dork_query}")
+            try:
+                encoded_query = urllib.parse.quote_plus(dork_query)
+                yandex_url = f"https://yandex.com/search/?text={encoded_query}&numdoc={num_results}"
+                
+                response = requests.get(yandex_url, headers=headers, timeout=15)
+                if response.status_code == 200:
+                    soup = BeautifulSoup(response.text, 'html.parser')
+                    
+                    # Find Yandex search result links
+                    for link in soup.find_all('a', class_='Link'):
+                        href = link.get('href')
+                        if href and href.startswith('http'):
+                            if not any(domain in href for domain in excluded_domains):
+                                urls.append(href)
+                    
+                    # Alternative selector for Yandex results
+                    for link in soup.find_all('a', {'class': re.compile(r'organic__url|Link_theme_outer')}):
+                        href = link.get('href')
+                        if href and href.startswith('http'):
+                            if not any(domain in href for domain in excluded_domains):
+                                urls.append(href)
+            except Exception as e:
+                logger.debug(f"Yandex error for query '{dork_query}': {str(e)}")
+        
+        # Remove duplicates
+        urls = list(set(urls))
+        logger.info(f"Found {len(urls)} unique URLs from DuckDuckGo and Yandex")
+        
+        # Print all found URLs
+        print_colored(f"\n[+] Found {len(urls)} URLs before verification:", Fore.YELLOW)
+        for i, url in enumerate(urls, 1):
+            print_colored(f"  [{i}] {url}", Fore.CYAN)
+        
+        # Verify each URL contains the search term
+        if urls:
+            logger.info(f"Verifying URLs contain '{search_term}'...")
+            for url in urls:
+                try:
+                    response = requests.get(url, timeout=10, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'})
+                    if response.status_code == 200:
+                        if search_term.lower() in response.text.lower():
+                            verified_urls.append(url)
+                            logger.info(f"Verified: {url}")
+                except Exception as e:
+                    logger.debug(f"Could not verify URL {url}: {str(e)}")
+            
+            logger.info(f"Verified {len(verified_urls)} URLs containing '{search_term}'")
     except Exception as e:
-        logger.error(f"Error during Google Dork search: {str(e)}")
-    return urls
+        logger.error(f"Error during Dork search: {str(e)}")
+    
+    return verified_urls
 
 def github_search(query, num_results=100):
     """
@@ -563,7 +643,7 @@ def enhanced_main(search_term, mode):
 
     Args:
         search_term (str): The search term to use for API discovery.
-        mode (str): The mode of operation ('-s', '-p', '-g', '-gh', '-a', '-explore').
+        mode (str): The mode of operation ('-s', '-p', '-g', '-gh', '-a', '-explore', '-e').
     """
     display_banner()  # Display the banner at the start
     print_colored("Starting API discovery and scanning process...", Fore.MAGENTA, style=Style.BRIGHT)
@@ -572,13 +652,13 @@ def enhanced_main(search_term, mode):
     apis_swagger, apis_postman, google_dork_urls, github_results = [], [], [], []
 
     try:
-        if mode in ["-s", "-a", "-explore"]:
+        if mode in ["-s", "-a", "-explore", "-e"]:
             apis_swagger = fetch_urls_and_descriptions_swagger(search_term)
-        if mode in ["-p", "-a", "-explore"]:
+        if mode in ["-p", "-a", "-explore", "-e"]:
             apis_postman = fetch_postman_explore(search_term)
-        if mode in ["-g", "-a", "-explore"]:
+        if mode in ["-g", "-a", "-explore", "-e"]:
             google_dork_urls = google_dork_search(search_term)
-        if mode in ["-gh", "-a", "-explore"]:
+        if mode in ["-gh", "-a", "-explore", "-e"]:
             github_query = f'"{search_term}" in:file language:python'
             github_results = github_search(github_query)
     except Exception as e:
@@ -613,11 +693,11 @@ def enhanced_main(search_term, mode):
         print_colored(f"\n[Postman URL] {url}", Fore.CYAN)
         print_colored(f"[Explore URL] {explore_url}", Fore.CYAN)
 
-    # Display and collect Google Dork results
+    # Display and collect Dork results
     if google_dork_urls:
-        print_colored("\n[+] Google Dork Results:", Fore.MAGENTA)
+        print_colored("\n[+] Dork Results:", Fore.MAGENTA)
         for url in google_dork_urls:
-            results.append(f"Google Dork URL: {url}")
+            results.append(f"Dork URL: {url}")
             print_colored(f"  [URL] {url}", Fore.CYAN)
 
     # Display and collect GitHub results
@@ -632,8 +712,8 @@ def enhanced_main(search_term, mode):
             print_colored(f"  [Repository] {repository}", Fore.CYAN)
             print_colored(f"  [URL] {file_url}", Fore.CYAN)
 
-    # If '-explore' mode is selected, scan for sensitive data
-    if "-explore" in mode:
+    # If '-explore' or '-e' mode is selected, scan for sensitive data
+    if mode in ["-explore", "-e"]:
         logger.info("-explore mode detected. Starting URL detection and sensitive data scan.")
         detected_urls = [api.get('url', 'N/A') for api in apis_swagger + apis_postman] + google_dork_urls + [result['file_url'] for result in github_results]
         logger.info(f"Total detected URLs: {len(detected_urls)}")
@@ -659,7 +739,8 @@ def enhanced_main(search_term, mode):
         "-g": "google",
         "-gh": "github",
         "-s": "swagger",
-        "-explore": "explore"
+        "-explore": "explore",
+        "-e": "explore"
     }
     output_dir = "results"
     os.makedirs(output_dir, exist_ok=True)
@@ -677,7 +758,7 @@ if __name__ == "__main__":
     if len(sys.argv) < 3:
         display_banner()  # Display the banner for incorrect usage
         print_colored("\nUsage: python3 monaleak.py <parameter> <search_term>", Fore.RED, style=Style.BRIGHT)
-        print_colored("Parameters:\n  -s : Search only SwaggerHub\n  -p : Search only Postman\n  -g : Perform Google Dork search\n  -gh : Perform GitHub search\n  -a : Search all\n  -explore : Find all secret in URLS ", Fore.RED)
+        print_colored("Parameters:\n  -s : Search only SwaggerHub\n  -p : Search only Postman\n  -g : Perform Dork search\n  -gh : Perform GitHub search\n  -a : Search all\n  -e/-explore : Find all secret in URLS ", Fore.RED)
         sys.exit(1)
 
     mode = sys.argv[1]
