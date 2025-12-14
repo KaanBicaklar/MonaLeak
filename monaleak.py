@@ -736,7 +736,7 @@ def enhanced_main(search_term, mode):
     mode_mapping = {
         "-a": "full",
         "-p": "postman",
-        "-g": "google",
+        "-g": "dork",
         "-gh": "github",
         "-s": "swagger",
         "-explore": "explore",
